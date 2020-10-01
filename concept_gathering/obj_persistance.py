@@ -116,8 +116,11 @@ def apply_pil_changes(frame):
 
 
 def save_embeddings_only(state, model, reducer_model):
-    img, proposals, concepts, concept_embeddings = model.concept_embeder.roi_extractor.get_concept_proposals_batch(state)
-    concepts, template_concept_embeddings, coords = model.concept_embeder.template_extractor.find_objects_in_frame_run(state)
+    img, proposals, concepts, concept_embeddings, masks_roi = model.concept_embeder.roi_extractor.get_concept_proposals_batch(state)
+    temp_concepts, template_concept_embeddings, coords, labels, masks_templates = model.concept_embeder.template_extractor.find_objects_in_frame_run(state)
+    nr_proposals = len(concept_embeddings)
+    nr_templates = len(template_concept_embeddings)
+    plt.imshow(img)
 
     in_concepts = torch.stack(concept_embeddings).unsqueeze(0).squeeze(2).to(device)
     if len(template_concept_embeddings) > 0:
@@ -130,18 +133,19 @@ def save_embeddings_only(state, model, reducer_model):
     if x.shape[1] < model.concept_nr:
         zeros = torch.zeros(model.concept_nr - x.shape[1], x.shape[2]).unsqueeze(0).to(device)
         x = torch.cat([x, zeros], dim=1).to(device)
-    # with torch.no_grad():
-    #     x = reducer_model(x)
-    return x, concepts, proposals
+    with torch.no_grad():
+        x = reducer_model(x)
+    return x, temp_concepts, proposals, coords, nr_proposals, nr_templates, labels, masks_roi, masks_templates
 
 
-def train(env, model, replay_buffer, params, num_episodes=1, target_model=None, reducer_model=None):
+def train(env, model, replay_buffer, params, num_episodes=30, target_model=None, reducer_model=None, env_id=1):
 
     episode_durations = []
 
     steps_done = 0
     counter = 0
     for i_episode in range(num_episodes):
+        replay_buffer = ReplayBufferConcepts(256)
         # Initialize the environment and state
         state_env = env.reset()
         state = process_frames(env)
@@ -164,14 +168,22 @@ def train(env, model, replay_buffer, params, num_episodes=1, target_model=None, 
 
             # Store the transition in memory
             state_emb = apply_pil_changes(state)
-            state_emb_res, concepts, proposals = save_embeddings_only(state_emb, model,reducer_model)
+            state_emb_res, concepts_state, proposals_state, coords_state, \
+            nr_templates_state, nr_proposals_state, labels_state, masks_roi, masks_templates = save_embeddings_only(
+                state_emb, model,reducer_model
+            )
 
             if next_state is not None:
                 next_state_emb = apply_pil_changes(next_state)
-                next_state_emb_res, concepts, proposals = save_embeddings_only(next_state_emb, model, reducer_model)
+                next_state_emb_res, concepts, proposals, coords, nr_templates, nr_proposals, labels, masks_roi_next, masks_templates_next = save_embeddings_only(
+                    next_state_emb, model, reducer_model
+                )
             else:
                 next_state_emb_res = next_state
-            replay_buffer.push(state_emb_res, action, reward, next_state_emb_res, done, concepts, proposals)
+            replay_buffer.push(state_emb_res, action, reward,
+                               next_state_emb_res, done, concepts_state,
+                               proposals_state, coords_state,
+                               nr_templates_state, nr_proposals_state, labels_state, masks_roi, masks_templates)
 
             # Move to the next state
             prev_state = state
@@ -180,7 +192,7 @@ def train(env, model, replay_buffer, params, num_episodes=1, target_model=None, 
             # Perform one step of the optimization (on the target network)
 
             if done:
-                with open(f"buffer_states_{i_episode}.pickle", "wb") as output_file:
+                with open(f"buffer_states_{i_episode}_{env_id}.pickle", "wb") as output_file:
                     pickle.dump(replay_buffer, output_file)
                 episode_durations.append(t + 1)
                 print(rew_ep)
@@ -193,8 +205,9 @@ def train(env, model, replay_buffer, params, num_episodes=1, target_model=None, 
 
 
 def load_buffer_states(i_episode=0):
-    with open(f"buffer_states_{i_episode}.pickle", "wb") as output_file:
+    with open(f"buffer_states_{i_episode}.pickle", "rb") as output_file:
         buffer_states = pickle.load(output_file)
+        torch.save(buffer_states, 'pickle_torch.pkl')
 
 
 
@@ -225,33 +238,35 @@ def main():
         'attention':'add',
 
     }
+    env_ids = [0,1]
+    for env_id in env_ids:
+        env, window = init_env(envs_to_run[env_id])
+        env.see_through_walls = False
+        env.agent_view_size = 3
+        concept_embeder = MiniGridEnv()
+        init_screen = apply_pil_changes(process_frames(env))
+        img, proposals, concepts, concept_embedding, masks_roi = concept_embeder.roi_extractor.get_concept_proposals_batch(
+            init_screen)
+        concept_dim = concept_embedding[0].shape[1]
+        params_att['concept_dim'] = concept_dim
+        reducer = ReducerNet(params_att).to(device)
+        params_att['reducer'] = reducer
+        dq_att = RelationalConceptGraphLearning(params_att).to(device)
 
-    env, window = init_env(envs_to_run[1])
-    env.see_through_walls = False
-    env.agent_view_size = 3
-    concept_embeder = MiniGridEnv()
-    init_screen = apply_pil_changes(process_frames(env))
-    img, proposals, concepts, concept_embedding = concept_embeder.roi_extractor.get_concept_proposals_batch(
-        init_screen)
-    concept_dim = concept_embedding[0].shape[1]
-    params_att['concept_dim'] = concept_dim
-    reducer = ReducerNet(params_att).to(device)
-    params_att['reducer'] = reducer
-    dq_att = RelationalConceptGraphLearning(params_att).to(device)
+        # from torchsummary import summary
+        # print(summary(dq_att, (15, 4096)))
 
-    # from torchsummary import summary
-    # print(summary(dq_att, (15, 4096)))
+        maxsteps = 256  # D
+        env.max_steps = maxsteps
 
-    maxsteps = 256  # D
-    env.max_steps = maxsteps
+        state_env = env.reset()
+        screen_height, screen_width, _ = init_screen.shape
+        n_actions = env.action_space.n
 
-    state_env = env.reset()
-    screen_height, screen_width, _ = init_screen.shape
-    n_actions = env.action_space.n
-    memory = ReplayBufferConcepts(2000)
 
-    dq_att = train(env, dq_att, memory, params, reducer_model=reducer)
-    torch.save(dq_att.state_dict(), 'double_att_att_concepts.pt')
+        dq_att = train(env, dq_att, None, params, reducer_model=reducer,env_id=env_id)
+        torch.save(dq_att.state_dict(), 'double_att_att_concepts.pt')
+
     return
 
 
@@ -284,8 +299,8 @@ def find_objects_in_frame(frame, objects, env_id):
 
 
 # for i, env in enumerate(envs_to_run):
-main()
-
+if __name__ == '__main__':
+    main()
 
 
 
