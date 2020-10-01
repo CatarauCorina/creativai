@@ -4,9 +4,26 @@ import os
 import uuid
 import torch
 import cv2
+from einops import rearrange
 import torchvision.transforms as T
 import matplotlib.pyplot as plt
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from concept_gathering.concept_embeder import ConceptDataSet
+
+faster = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
+num_classes = 4
+in_features = faster.roi_heads.box_predictor.cls_score.in_features
+faster.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+dir = f'{os.getcwd()}'
+use_checkpoint=True
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+if use_checkpoint:
+    top_dir = os.path.dirname(dir)
+    cwd = f'{top_dir}/concept_gathering/checkpoints/faster_more.pt'
+    faster.load_state_dict(torch.load(cwd, map_location=device))
+
+faster = faster.to(device)
 
 
 class ROIConceptExtractor:
@@ -14,66 +31,101 @@ class ROIConceptExtractor:
         '__background__', 'square', 'circle',
         'triangle', 'key', 'door'
     ]
-    device = torch.device('cpu')
+    device =  torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
     def __init__(self, use_checkpoint=False, checkpoint_file_name=""):
         self.checkpoint_file = checkpoint_file_name
-        faster = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
-        num_classes = 4
-        in_features = faster.roi_heads.box_predictor.cls_score.in_features
-        faster.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+        self.concept_ds = ConceptDataSet()
         self.dir = f'{os.getcwd()}'
-        if use_checkpoint:
-            cwd = f'{self.dir}/checkpoints/{checkpoint_file_name}'
-            faster.load_state_dict(torch.load(cwd, map_location=self.device))
+
         faster.eval()
         self.model = faster
         transform = T.Compose([T.ToTensor()])
         self.to_tensor_transf = transform
+        self.outputs= []
+        self.sizes = []
+
+        def hook(module, x, y):
+            x[1][0] = x[1][0].detach()
+            for key in x[0].keys():
+                x[0][key] = x[0][key].detach()
+
+            y[0][0]['scores'] = y[0][0]['scores'].detach()
+            y[0][0]['labels'] = y[0][0]['labels'].detach()
+            y[0][0]['boxes'] = y[0][0]['boxes'].detach()
+
+            scores = [idx for idx, score in enumerate(y[0][0]['scores'][:10])]
+            boxes = y[0][0]['boxes'][scores]
+            self.outputs.append(boxes)
+            self.sizes.append(x[2][0])
+            del x
+            del y
+
+        self.model.roi_heads.register_forward_hook(hook)
 
     def get_concept_proposals_display(self, img, rect_th=1):
         proposals = self.get_roi(img)[0]
+        concepts = []
+        concept_embeddings = []
 
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert to RGB
-        img_prop = img.copy()
+        # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert to RGB
+        img_prop = img
 
         for i in range(proposals.shape[0]):
             roi = img_prop[int(proposals[i][1]):int(proposals[i][3]), int(proposals[i][0]):int(proposals[i][2])]
             cv2.imwrite(f'{self.dir}/concepts/obj_{uuid.uuid4()}.png', roi)
+            tensor_image, embeded_concept, image_resize = self.concept_ds.get_embedding(roi)
+            concepts.append(roi)
+            concept_embeddings.append(embeded_concept)
 
             cv2.rectangle(img, (proposals[i][0], proposals[i][1]), (proposals[i][2], proposals[i][3]),
                           color=(0, 255, 0), thickness=rect_th)  # Draw Rectangle with the coordinates
 
+        # plt.imshow(img)
+        # id = uuid.uuid4()
+
+        # plt.savefig(f'{self.dir}/outputs/roi_{id}_{self.checkpoint_file}.jpg')
+        return img, proposals, concepts, concept_embeddings
+
+
+    def get_concept_proposals_batch(self, batch_img, rect_th=1):
+        proposals = self.get_roi(batch_img)[0]
+        concepts = []
+        concept_embeddings = []
+
+        img = cv2.cvtColor(batch_img, cv2.COLOR_BGR2RGB)  # Convert to RGB
+        img_prop = img
+
+        for i in range(proposals.shape[0]):
+            roi = img_prop[int(proposals[i][1]):int(proposals[i][3]), int(proposals[i][0]):int(proposals[i][2])]
+            embeded_concept, image_resize = self.concept_ds.get_embedding(roi)
+            concepts.append(roi)
+
+            concept_embeddings.append(embeded_concept.detach())
+            cv2.rectangle(img, (proposals[i][0], proposals[i][1]), (proposals[i][2], proposals[i][3]),
+                          color=(0, 255, 0), thickness=rect_th)
+
         plt.imshow(img)
-        id = uuid.uuid4()
+        plt.show()
 
-        plt.savefig(f'{self.dir}/outputs/roi_{id}_{self.checkpoint_file}.jpg')
-        return
-
+        return img, proposals, concepts, concept_embeddings
 
     def get_roi(self, img):
-        device = torch.device('cpu')
-        img = self.to_tensor_transf(img)
-        outputs = []
-        sizes = []
+        img = self.to_tensor_transf(img).to(self.device)
+        self.outputs = []
+        self.sizes = []
 
-        def hook(module, x, y):
-            scores = [idx for idx, score in enumerate(y[0][0]['scores'][:5])]
-            boxes = y[0][0]['boxes'][scores]
-            outputs.append(boxes)
-            sizes.append(x[2][0])
-
-        self.model.roi_heads.register_forward_hook(hook)
         pred = self.model([img])
 
-        scale_ratio_x = sizes[0][0] / img.shape[1]
-        scale_ratio_y = sizes[0][1] / img.shape[2]
-        outputs[0][:, 0] = outputs[0][:, 0] / scale_ratio_x
-        outputs[0][:, 2] = outputs[0][:, 2] / scale_ratio_x
+        scale_ratio_x = self.sizes[0][0] / img.shape[1]
+        scale_ratio_y = self.sizes[0][1] / img.shape[2]
+        self.outputs[0][:, 0] = self.outputs[0][:, 0] / scale_ratio_x
+        self.outputs[0][:, 2] = self.outputs[0][:, 2] / scale_ratio_x
 
-        outputs[0][:, 1] = outputs[0][:, 1] / scale_ratio_y
-        outputs[0][:, 3] = outputs[0][:, 3] / scale_ratio_y
-        return outputs
+        self.outputs[0][:, 1] = self.outputs[0][:, 1] / scale_ratio_y
+        self.outputs[0][:, 3] = self.outputs[0][:, 3] / scale_ratio_y
+        del img
+        return self.outputs
 
     def get_rpn(self, img_path):
         img = Image.open(img_path)  # Load the image
@@ -120,22 +172,22 @@ class ROIConceptExtractor:
 
 
 
-def main():
-    #object_detection_api('mn2.jpg', threshold=0.5)
-    dir = f'{os.getcwd()}/concept_gathering/imgs/mn_circle2.png'
-    image = cv2.imread(dir)
-    roi_extractor_1 = ROIConceptExtractor()
-    roi_extractor_2 = ROIConceptExtractor(use_checkpoint=True, checkpoint_file_name='faster_max_3obj.pt')
-    roi_extractor_3 = ROIConceptExtractor(use_checkpoint=True, checkpoint_file_name='faster_more.pt')
-    #roi_extractor_3.get_object_detection_display(dir,threshold=0.8)
-    roi_extractor_1.get_concept_proposals_display(image)
-    roi_extractor_2.get_concept_proposals_display(image)
-    roi_extractor_3.get_concept_proposals_display(image)
-
-    return
-
-if __name__ == '__main__':
-    main()
+# def main():
+#     #object_detection_api('mn2.jpg', threshold=0.5)
+#     dir = f'{os.getcwd()}/concept_gathering/imgs/mn_circle2.png'
+#     image = cv2.imread(dir)
+#     roi_extractor_1 = ROIConceptExtractor()
+#     roi_extractor_2 = ROIConceptExtractor(use_checkpoint=True, checkpoint_file_name='faster_max_3obj.pt')
+#     roi_extractor_3 = ROIConceptExtractor(use_checkpoint=True, checkpoint_file_name='faster_more.pt')
+#     #roi_extractor_3.get_object_detection_display(dir,threshold=0.8)
+#     roi_extractor_1.get_concept_proposals_display(image)
+#     roi_extractor_2.get_concept_proposals_display(image)
+#     roi_extractor_3.get_concept_proposals_display(image)
+#
+#     return
+#
+# if __name__ == '__main__':
+#     main()
 
 
 

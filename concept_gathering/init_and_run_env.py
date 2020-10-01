@@ -2,7 +2,7 @@ import cv2 as cv
 import numpy as np
 import torch
 import uuid
-import tensorflow as tf
+
 from matplotlib import pyplot as plt
 from gym_minigrid.wrappers import *
 from PIL import Image
@@ -27,7 +27,7 @@ class MiniGridEnv:
 
     def __init__(self):
         self.roi_extractor = ROIConceptExtractor(use_checkpoint=True, checkpoint_file_name='faster_more.pt')
-        self.roi_extractor_no_check = ROIConceptExtractor()
+        # self.roi_extractor_no_check = ROIConceptExtractor()
         self.template_extractor = TemplateConceptExtractor()
         return
 
@@ -59,7 +59,7 @@ class MiniGridEnv:
             next_state, reward, done, _ = env.step(actions[nr])
             crt_frame = self.process_frames(env).convert('RGB')
             crt_frame = np.array(crt_frame)
-            self.template_extractor.find_objects_in_frame(crt_frame, env_id)
+            self.template_extractor.find_objects_in_frame(crt_frame)
         return
 
     def process_env_roi_extraction(self, env_id):
@@ -80,14 +80,14 @@ class MiniGridEnv:
 
 
 
-def main():
-    env = MiniGridEnv()
-    #env.process_env_template_matching(0)
-    env.process_env_roi_extraction(0)
-    return
-
-
-if __name__ == '__main__':
-    main()
+# def main():
+#     env = MiniGridEnv()
+#     #env.process_env_template_matching(0)
+#     env.process_env_roi_extraction(0)
+#     return
+#
+#
+# if __name__ == '__main__':
+#     main()
 
 
