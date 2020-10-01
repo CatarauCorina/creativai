@@ -7,4 +7,6 @@ The PCA-GM component has been developed by:
 https://github.com/Thinklab-SJTU/PCA-GM
 
 Libraries used: Pytorch, Pytorch geometric
-Checkpoints can be found at: 
+
+
+Checkpoints can be found at: https://drive.google.com/drive/folders/1hqE_stkvi2UC-aqZ9HXutvidiFsxy_FU?usp=sharing
